@@ -1,0 +1,578 @@
+import java.io.*;
+import java.net.*;
+import java.util.Scanner;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.nio.file.*;
+import javax.sound.sampled.*;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+
+public class ChatClient {
+    private static final String SERVER_ADDRESS = "localhost";
+    private static final int SERVER_PORT = 5000;
+    private static final String CLIENT_LOGS_DIR = "client_logs";
+    private static final String DOWNLOADS_DIR = "downloads";
+    private static final String VOICE_RECORDINGS_DIR = "recordings";
+    private static PrintWriter logWriter;
+    private static boolean isRecording = false;
+    private static TargetDataLine micLine;
+    private static Socket socket;
+    private static BufferedReader in;
+    private static PrintWriter out;
+    private static DataOutputStream dataOut;
+    private static DataInputStream dataIn;
+    private static boolean fileTransferInProgress = false;
+    private static final Object transferLock = new Object(); // Lock object for synchronization
+    
+    // Command type enum to handle special server requests
+    private enum CommandType {
+        SEND_FILE,
+        RECEIVE_FILE,
+        SEND_VOICE,
+        RECEIVE_VOICE,
+        NORMAL
+    }
+    
+    // Command class to store server requests
+    private static class Command {
+        CommandType type;
+        String message;
+        
+        public Command(CommandType type, String message) {
+            this.type = type;
+            this.message = message;
+        }
+    }
+    
+    // Queue for special commands from server
+    private static BlockingQueue<Command> commandQueue = new LinkedBlockingQueue<>();
+    
+    public static void main(String[] args) {
+        try {
+            // Create necessary directories
+            createDirectories();
+            
+            // Open log file
+            openLogFile();
+            
+            socket = new Socket(SERVER_ADDRESS, SERVER_PORT);
+            
+            in = new BufferedReader(
+                new InputStreamReader(socket.getInputStream()));
+            out = new PrintWriter(socket.getOutputStream(), true);
+            dataOut = new DataOutputStream(socket.getOutputStream());
+            dataIn = new DataInputStream(socket.getInputStream());
+            
+            // Start the message listener thread
+            Thread listenerThread = new Thread(() -> {
+                try {
+                    String message;
+                    while ((message = in.readLine()) != null) {
+                        System.out.println(message);
+                        logMessage("SERVER: " + message);
+                        
+                        // Queue special commands instead of handling them directly
+                        if (message.equals("READY_TO_RECEIVE_FILE")) {
+                            commandQueue.put(new Command(CommandType.SEND_FILE, message));
+                        } else if (message.equals("SENDING_FILE")) {
+                            commandQueue.put(new Command(CommandType.RECEIVE_FILE, message));
+                        } else if (message.equals("READY_TO_RECEIVE_VOICE")) {
+                            commandQueue.put(new Command(CommandType.SEND_VOICE, message));
+                        } else if (message.equals("SENDING_VOICE")) {
+                            commandQueue.put(new Command(CommandType.RECEIVE_VOICE, message));
+                        }
+                    }
+                } catch (IOException | InterruptedException e) {
+                    System.err.println("Connection to server lost: " + e.getMessage());
+                    e.printStackTrace();
+                    // Ensure we clear file transfer status if connection is lost
+                    synchronized (transferLock) {
+                        fileTransferInProgress = false;
+                    }
+                }
+            });
+            listenerThread.start();
+            
+            // Start command processor thread
+            Thread commandThread = new Thread(() -> {
+                try {
+                    while (true) {
+                        Command cmd = commandQueue.take();  // This blocks until a command is available
+                        
+                        // Set transfer flag with synchronization
+                        synchronized (transferLock) {
+                            fileTransferInProgress = true;
+                        }
+                        
+                        try {
+                            switch (cmd.type) {
+                                case SEND_FILE:
+                                    sendFile();
+                                    break;
+                                case RECEIVE_FILE:
+                                    receiveFile();
+                                    break;
+                                case SEND_VOICE:
+                                    sendVoiceMessage();
+                                    break;
+                                case RECEIVE_VOICE:
+                                    receiveVoiceMessage();
+                                    break;
+                                default:
+                                    // Handle other command types if needed
+                                    break;
+                            }
+                        } catch (Exception e) {
+                            System.err.println("Error in command processor: " + e.getMessage());
+                            e.printStackTrace();
+                        } finally {
+                            // Always reset transfer flag with synchronization
+                            synchronized (transferLock) {
+                                fileTransferInProgress = false;
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println("Fatal error in command processor: " + e.getMessage());
+                    e.printStackTrace();
+                    // Ensure we clear file transfer status if thread fails
+                    synchronized (transferLock) {
+                        fileTransferInProgress = false;
+                    }
+                }
+            });
+            commandThread.start();
+            
+            // Print welcome message and instructions
+            System.out.println("Connected to chat server. Type /help for available commands.");
+            logMessage("Connected to chat server at " + SERVER_ADDRESS + ":" + SERVER_PORT);
+            
+            // Main input loop
+            Scanner userInput = new Scanner(System.in);
+            try {
+                while (true) {
+                    String message = userInput.nextLine();
+                    
+                    // Check transfer status with synchronization
+                    boolean transferActive;
+                    synchronized (transferLock) {
+                        transferActive = fileTransferInProgress;
+                    }
+                    
+                    // Skip user input if a file transfer is in progress
+                    if (transferActive && !message.equals("/stop")) {
+                        System.out.println("File transfer in progress. Please wait...");
+                        continue;
+                    }
+                    
+                    if ("/quit".equals(message)) {
+                        logMessage("Disconnecting from server");
+                        break;
+                    }
+                    
+                    // Log outgoing message
+                    logMessage("YOU: " + message);
+                    
+                    // Check for voice recording command
+                    if ("/record".equals(message)) {
+                        if (!isRecording) {
+                            System.out.println("Recording voice message... Type /stop to finish recording.");
+                            startRecording();
+                        } else {
+                            System.out.println("Already recording. Type /stop to finish recording.");
+                        }
+                    } else if ("/stop".equals(message)) {
+                        if (isRecording) {
+                            stopRecording();
+                            System.out.println("Recording stopped. Use /sendvoice to send the voice message.");
+                        } else {
+                            System.out.println("Not currently recording.");
+                        }
+                    } else {
+                        // Send the message to the server
+                        out.println(message);
+                    }
+                }
+            } finally {
+                // Close resources
+                socket.close();
+                userInput.close();
+                closeLogFile();
+            }
+            
+        } catch (IOException e) {
+            System.err.println("Error connecting to server: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    private static void createDirectories() {
+        try {
+            Files.createDirectories(Paths.get(CLIENT_LOGS_DIR));
+            Files.createDirectories(Paths.get(DOWNLOADS_DIR));
+            Files.createDirectories(Paths.get(VOICE_RECORDINGS_DIR));
+            System.out.println("Created necessary directories for client operation");
+        } catch (IOException e) {
+            System.err.println("Error creating directories: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    private static void openLogFile() {
+        try {
+            String logFileName = CLIENT_LOGS_DIR + File.separator + "chat_" + 
+                               LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")) + ".log";
+            logWriter = new PrintWriter(new FileWriter(logFileName, true), true);
+            logMessage("--- Chat session started at " + 
+                     LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")) + " ---");
+        } catch (IOException e) {
+            System.err.println("Error creating log file: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    private static void closeLogFile() {
+        if (logWriter != null) {
+            logMessage("--- Chat session ended at " + 
+                     LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")) + " ---");
+            logWriter.close();
+        }
+    }
+    
+    private static void logMessage(String message) {
+        if (logWriter != null) {
+            logWriter.println("[" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "] " + message);
+        }
+    }
+    
+    private static void sendFile() throws IOException {
+        // Use a separate scanner to prevent conflicts with the main input loop
+        Scanner fileScanner = new Scanner(System.in);
+        System.out.println("Enter the path to the file you want to send (or type 'cancel' to abort):");
+        String filePath = fileScanner.nextLine();
+        
+        // Allow user to cancel the operation
+        if ("cancel".equalsIgnoreCase(filePath)) {
+            System.out.println("File transfer cancelled by user.");
+            out.println("FILE_TRANSFER_CANCELLED");
+            return;
+        }
+        
+        File file = new File(filePath);
+        if (!file.exists() || !file.isFile()) {
+            System.out.println("File not found: " + filePath);
+            // Send FILE_TRANSFER_CANCELLED to server to inform it that no file will be sent
+            out.println("FILE_TRANSFER_CANCELLED");
+            return;
+        }
+        
+        long fileSize = file.length();
+        String fileName = file.getName();
+        
+        // Send file name and size
+        out.println(fileName);
+        out.println(String.valueOf(fileSize));
+        
+        System.out.println("Sending file: " + fileName + " (" + formatFileSize(fileSize) + ")");
+        logMessage("Sending file: " + fileName + " (" + formatFileSize(fileSize) + ")");
+        
+        try (FileInputStream fileIn = new FileInputStream(file)) {
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            long totalBytesSent = 0;
+            int percentCompleted = 0;
+            
+            while ((bytesRead = fileIn.read(buffer)) != -1) {
+                dataOut.write(buffer, 0, bytesRead);
+                totalBytesSent += bytesRead;
+                
+                int newPercentCompleted = (int) ((totalBytesSent * 100) / fileSize);
+                if (newPercentCompleted >= percentCompleted + 10) {
+                    percentCompleted = newPercentCompleted;
+                    System.out.println("Upload progress: " + percentCompleted + "%");
+                }
+            }
+            dataOut.flush();
+        } catch (IOException e) {
+            System.err.println("Error sending file: " + e.getMessage());
+            e.printStackTrace();
+            throw e; // Rethrow to ensure finally block in caller handles cleanup
+        }
+        
+        System.out.println("File sent successfully");
+        logMessage("File sent successfully: " + fileName);
+    }
+    
+    private static void receiveFile() throws IOException {
+        String fileName = in.readLine();
+        
+        // Handle potential non-numeric content safely
+        String fileSizeStr = in.readLine();
+        long fileSize;
+        try {
+            fileSize = Long.parseLong(fileSizeStr);
+        } catch (NumberFormatException e) {
+            System.err.println("Error parsing file size: " + fileSizeStr);
+            logMessage("Error parsing file size: " + fileSizeStr);
+            System.err.println("Content of file may have been corrupted. Trying to save anyway.");
+            fileSize = 1024 * 1024; // Default to 1MB as a fallback
+        }
+        
+        // Ensure the downloads directory exists
+        Files.createDirectories(Paths.get(DOWNLOADS_DIR));
+        String downloadPath = DOWNLOADS_DIR + File.separator + fileName;
+        
+        System.out.println("Receiving file: " + fileName + " (" + formatFileSize(fileSize) + ")");
+        logMessage("Receiving file: " + fileName + " (" + formatFileSize(fileSize) + ")");
+        
+        try (FileOutputStream fileOut = new FileOutputStream(downloadPath)) {
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            long totalBytesRead = 0;
+            int percentCompleted = 0;
+            
+            while (totalBytesRead < fileSize) {
+                try {
+                    int remaining = (int) Math.min(buffer.length, fileSize - totalBytesRead);
+                    bytesRead = dataIn.read(buffer, 0, remaining);
+                    if (bytesRead == -1) break;
+                    
+                    fileOut.write(buffer, 0, bytesRead);
+                    totalBytesRead += bytesRead;
+                    
+                    int newPercentCompleted = (int) ((totalBytesRead * 100) / fileSize);
+                    if (newPercentCompleted >= percentCompleted + 10) {
+                        percentCompleted = newPercentCompleted;
+                        System.out.println("Download progress: " + percentCompleted + "%");
+                    }
+                } catch (EOFException e) {
+                    System.err.println("End of file reached unexpectedly");
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error while receiving file: " + e.getMessage());
+            e.printStackTrace();
+            throw e; // Rethrow to ensure finally block in caller handles cleanup
+        }
+        
+        System.out.println("File downloaded successfully to: " + downloadPath);
+        logMessage("File downloaded successfully: " + fileName);
+    }
+    
+    private static String formatFileSize(long size) {
+        final String[] units = new String[] { "B", "KB", "MB", "GB", "TB" };
+        int unitIndex = 0;
+        double fileSize = size;
+        
+        while (fileSize > 1024 && unitIndex < units.length - 1) {
+            fileSize /= 1024;
+            unitIndex++;
+        }
+        
+        return String.format("%.2f %s", fileSize, units[unitIndex]);
+    }
+    
+    private static void startRecording() {
+        try {
+            // Ensure the recordings directory exists
+            Files.createDirectories(Paths.get(VOICE_RECORDINGS_DIR));
+            
+            // Set up audio format
+            AudioFormat format = new AudioFormat(
+                AudioFormat.Encoding.PCM_SIGNED,
+                44100, // Sample rate
+                16,    // Sample size in bits
+                1,     // Channels (1 = mono)
+                2,     // Frame size in bytes
+                44100, // Frame rate
+                false  // Big-endian
+            );
+            
+            // Get and open the target data line for capturing audio
+            DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
+            if (!AudioSystem.isLineSupported(info)) {
+                System.out.println("Microphone not supported");
+                return;
+            }
+            
+            // Get the line
+            micLine = (TargetDataLine) AudioSystem.getLine(info);
+            micLine.open(format);
+            micLine.start();
+            
+            // Create a thread for recording
+            isRecording = true;
+            Thread recordingThread = new Thread(() -> {
+                try {
+                    // Create file to store recording
+                    String recordingPath = VOICE_RECORDINGS_DIR + File.separator + 
+                                         "recording_" + System.currentTimeMillis() + ".wav";
+                    
+                    AudioInputStream audioStream = new AudioInputStream(micLine);
+                    File audioFile = new File(recordingPath);
+                    
+                    // Start recording
+                    AudioSystem.write(audioStream, AudioFileFormat.Type.WAVE, audioFile);
+                } catch (IOException e) {
+                    System.err.println("Error recording audio: " + e.getMessage());
+                    e.printStackTrace();
+                }
+            });
+            
+            recordingThread.start();
+            logMessage("Started voice recording");
+            
+        } catch (LineUnavailableException e) {
+            System.err.println("Error accessing microphone: " + e.getMessage());
+            e.printStackTrace();
+        } catch (IOException e) {
+            System.err.println("Error creating recordings directory: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    private static void stopRecording() {
+        if (micLine != null && micLine.isOpen()) {
+            isRecording = false;
+            micLine.stop();
+            micLine.close();
+            logMessage("Stopped voice recording");
+        }
+    }
+    
+    private static void sendVoiceMessage() throws IOException {
+        // Ensure the recordings directory exists
+        Files.createDirectories(Paths.get(VOICE_RECORDINGS_DIR));
+        
+        // Find the most recent recording
+        File recordingsDir = new File(VOICE_RECORDINGS_DIR);
+        File[] recordings = recordingsDir.listFiles((dir, name) -> name.startsWith("recording_") && name.endsWith(".wav"));
+        
+        if (recordings == null || recordings.length == 0) {
+            System.out.println("No recordings found. Record a voice message first with /record.");
+            out.println("VOICE_TRANSFER_CANCELLED");
+            return;
+        }
+        
+        // Find the most recent recording
+        File latestRecording = recordings[0];
+        for (File recording : recordings) {
+            if (recording.lastModified() > latestRecording.lastModified()) {
+                latestRecording = recording;
+            }
+        }
+        
+        // Get file info
+        long fileSize = latestRecording.length();
+        long recordingDuration = getAudioDuration(latestRecording);
+        
+        // Send recording info
+        out.println(String.valueOf(recordingDuration));
+        out.println(String.valueOf(fileSize));
+        
+        System.out.println("Sending voice message: " + formatFileSize(fileSize) + 
+                         " (Duration: " + (recordingDuration / 1000) + " seconds)");
+        logMessage("Sending voice message (" + (recordingDuration / 1000) + " seconds)");
+        
+        // Send the actual audio data
+        try (FileInputStream fileIn = new FileInputStream(latestRecording)) {
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            while ((bytesRead = fileIn.read(buffer)) != -1) {
+                dataOut.write(buffer, 0, bytesRead);
+            }
+            dataOut.flush();
+        } catch (IOException e) {
+            System.err.println("Error sending voice message: " + e.getMessage());
+            e.printStackTrace();
+            throw e; // Rethrow to ensure finally block in caller handles cleanup
+        }
+        
+        System.out.println("Voice message sent successfully");
+        logMessage("Voice message sent successfully");
+    }
+    
+    private static void receiveVoiceMessage() throws IOException {
+        // Ensure the recordings directory exists
+        Files.createDirectories(Paths.get(VOICE_RECORDINGS_DIR));
+        
+        long fileSize = Long.parseLong(in.readLine());
+        
+        String downloadPath = VOICE_RECORDINGS_DIR + File.separator + 
+                            "received_" + System.currentTimeMillis() + ".wav";
+        
+        System.out.println("Receiving voice message: " + formatFileSize(fileSize));
+        logMessage("Receiving voice message: " + formatFileSize(fileSize));
+        
+        try (FileOutputStream fileOut = new FileOutputStream(downloadPath)) {
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            long totalBytesRead = 0;
+            
+            while (totalBytesRead < fileSize) {
+                int remaining = (int) Math.min(buffer.length, fileSize - totalBytesRead);
+                bytesRead = dataIn.read(buffer, 0, remaining);
+                if (bytesRead == -1) break;
+                
+                fileOut.write(buffer, 0, bytesRead);
+                totalBytesRead += bytesRead;
+            }
+        } catch (IOException e) {
+            System.err.println("Error receiving voice message: " + e.getMessage());
+            e.printStackTrace();
+            throw e; // Rethrow to ensure finally block in caller handles cleanup
+        }
+        
+        System.out.println("Voice message downloaded successfully");
+        logMessage("Voice message downloaded successfully");
+        
+        // Play the received voice message
+        playAudio(new File(downloadPath));
+    }
+    
+    private static long getAudioDuration(File audioFile) {
+        try {
+            AudioInputStream audioStream = AudioSystem.getAudioInputStream(audioFile);
+            AudioFormat format = audioStream.getFormat();
+            long frames = audioStream.getFrameLength();
+            double durationInSeconds = (frames / format.getFrameRate());
+            return (long) (durationInSeconds * 1000); // Convert to milliseconds
+        } catch (Exception e) {
+            System.err.println("Error getting audio duration: " + e.getMessage());
+            e.printStackTrace();
+            return 0;
+        }
+    }
+    
+    private static void playAudio(File audioFile) {
+        try {
+            AudioInputStream audioStream = AudioSystem.getAudioInputStream(audioFile);
+            AudioFormat format = audioStream.getFormat();
+            DataLine.Info info = new DataLine.Info(SourceDataLine.class, format);
+            
+            SourceDataLine line = (SourceDataLine) AudioSystem.getLine(info);
+            line.open(format);
+            line.start();
+            
+            System.out.println("Playing voice message...");
+            
+            byte[] buffer = new byte[4096];
+            int bytesRead = 0;
+            
+            while ((bytesRead = audioStream.read(buffer, 0, buffer.length)) != -1) {
+                line.write(buffer, 0, bytesRead);
+            }
+            
+            line.drain();
+            line.close();
+            audioStream.close();
+            
+            System.out.println("Voice message playback complete");
+        } catch (Exception e) {
+            System.err.println("Error playing audio: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+}
