@@ -24,6 +24,7 @@ CREATIGN A ROOM AND SENDING A PRIVATE MESSAGE
 ![image](https://github.com/user-attachments/assets/1aeadda4-d213-40fc-8bed-d7ea562c032f)
 
 VOICES FUNCTIONALITY:
+
 ![image](https://github.com/user-attachments/assets/9bea17a3-0513-45b9-95ef-903dd825c306)
 
 FILE SHARING FUNCTIONALITY:
