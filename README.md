@@ -19,7 +19,17 @@ Type /help to see available commands
 
 NORMAL CHAT AMONG CLIENTS
 
-![image](https://github.com/user-attachments/assets/dd504c2b-bc04-4d07-a8a4-e0a0184b0045)
+![image](https://github.com/user-attachments/assets/124e47f6-6d49-4b71-8f80-3511561e25eb)
 
+ALL AVALILABLE COMMANDS
+![image](https://github.com/user-attachments/assets/e52a4647-9777-45e9-837b-5feaed727bfe)
+
+
+PRIVATE COMMUNICATION
+![image](https://github.com/user-attachments/assets/fd918302-51d3-45cf-b525-ba678f6acb90)
+
+
+FILE SHARING
+![image](https://github.com/user-attachments/assets/bec573ea-05ef-43cb-bb8d-2c43fbfd8921)
 
 
