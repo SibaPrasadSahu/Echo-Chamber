@@ -21,12 +21,21 @@ NORMAL CHAT AMONG CLIENTS
 
 ![image](https://github.com/user-attachments/assets/124e47f6-6d49-4b71-8f80-3511561e25eb)
 
+
+
+
 ALL AVALILABLE COMMANDS
 ![image](https://github.com/user-attachments/assets/e52a4647-9777-45e9-837b-5feaed727bfe)
 
 
+
+
+
 PRIVATE COMMUNICATION
 ![image](https://github.com/user-attachments/assets/fd918302-51d3-45cf-b525-ba678f6acb90)
+
+
+
 
 
 FILE SHARING
