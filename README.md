@@ -1,7 +1,7 @@
 Echo Chamber
 A multi-threaded Java chat application with support for multiple chat rooms, private messaging, file sharing, and voice messages.
-Features
 
+Features:
 🌐 Multiple chat rooms with dynamic creation and management
 📁 File transfer with progress tracking and size verification
 🎤 Voice message recording and playback using Java Sound API
@@ -11,15 +11,19 @@ Features
 
 Technology
 Built with pure Java using socket programming, multi-threading (ExecutorService), concurrent collections, and the Java Sound API. No external dependencies required.
-Getting Started
-
+Getting Started - 
 Start the server: java ChatServer
 Connect with clients: java ChatClient
+
 Type /help to see available commands
 
 NORMAL CHAT AMONG CLIENTS
-
 ![image](https://github.com/user-attachments/assets/124e47f6-6d49-4b71-8f80-3511561e25eb)
+
+
+
+
+
 
 
 
@@ -31,8 +35,17 @@ ALL AVALILABLE COMMANDS
 
 
 
+
+
+
+
+
 PRIVATE COMMUNICATION
 ![image](https://github.com/user-attachments/assets/fd918302-51d3-45cf-b525-ba678f6acb90)
+
+
+
+
 
 
 
